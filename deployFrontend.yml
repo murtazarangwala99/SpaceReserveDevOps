@@ -1,0 +1,95 @@
+Final Frontend Ansible Playbook
+---
+- name: "Deploy Latest Artifact to IIS"
+  hosts: windows
+  gather_facts: no
+  vars:
+    site_name: dev_spacereserve_frontend_user
+    Latest_Artifact_Path: "C:\\Latest_Frontend_Artifact"
+    iis_deploy_path: "C:\\inetpub\\wwwroot\\{{site_name}}"
+    port: 8040
+    project_version: 1.0.0
+
+  tasks:
+    - name: "Delete Previous Artifact Files from Server"
+      win_file:
+        path: "{{ Latest_Artifact_Path }}"
+        state: absent
+    - name: "Create Artifact Directory on Server"
+      win_file:
+        path: "{{ Latest_Artifact_Path }}"
+        state: directory
+    - name: "Create Artifact Directory on Localhost (Linux)"
+      file:
+        path: "/tmp/Latest_Artifacts"
+        state: directory   
+      delegate_to: localhost
+    - name: "Download Latest ZIP Artifact from Nexus"
+      shell: |
+        curl -s "http://172.16.1.226:8081/service/rest/v1/search/assets?sort=version&direction=desc&repository=Space-Reserve&format=maven2&group=Space-Reserve&name={{site_name}}&version={{project_version}}" \
+        | grep -oP '"downloadUrl"\s*:\s*"\K[^"]+\.zip' \
+        | sort -r \
+        | head -n 1 \
+        | xargs curl -O
+      args:
+        chdir: "/tmp/Latest_Artifacts"  #directory where you want to store the file
+      delegate_to: localhost
+    - name: "Copy ZIP Artifact from Localhost to Windows Server"
+      win_copy:
+        src: "/tmp/Latest_Artifacts"
+        dest: "{{Latest_Artifact_Path}}"
+ 
+    - name: "Delete Zip from Localhost after successfully copying"
+      file:
+        path: "/tmp/Latest_Artifacts"
+        state: absent  
+      delegate_to: localhost
+ 
+    - name: "Ensure IIS Deployment Path Exists"
+      win_file:
+        path: "C:\\inetpub\\wwwroot\\{{site_name}}"
+        state: directory
+ 
+    - name: "Create Custom Application Pool"
+      win_iis_webapppool:
+        name: "{{site_name}}"
+        state: started
+    - name: "Create the IIS site for Deployment"
+      win_iis_website:
+        name: "{{site_name}}"
+        state: started
+        physical_path: "{{ iis_deploy_path}}"
+        port: "{{ port }}"
+        ip: "*"
+        application_pool: "{{site_name}}"
+    - name: "Stop IIS Application Pool"
+      win_shell: |
+        Import-Module WebAdministration
+        Stop-WebAppPool -Name "{{site_name}}"
+      register: stop_iis_result
+    - name: "Verify IIS Application Pool Stopped Successfully"
+      debug:
+        msg: "IIS Application stopped successfully"
+      when: stop_iis_result.rc == 0
+ 
+    - name: "Remove Old Files from IIS Deployment Directory"
+      win_file:
+        path: "{{ iis_deploy_path }}"
+        state: absent
+ 
+    - name: "Find ZIP Artifact in Server Directory"
+      win_find:
+        paths: "{{ Latest_Artifact_Path }}\\Latest_Artifacts" 
+        patterns: "*.zip"
+      register: zip_files
+    - name: "Extract ZIP Artifact to IIS Deployment Directory"
+      win_unzip:
+        src: "{{ zip_files.files[0].path }}"
+        dest: "{{ iis_deploy_path }}"
+        #delete_archive: yes
+      when: zip_files.files | length > 0
+    - name: "Restart IIS Application Pool"
+      win_shell: |
+        Import-Module WebAdministration
+        Start-WebAppPool -Name "{{site_name}}"
+      register: restart_iis_result
