@@ -2,7 +2,7 @@
 
 ---
 - name: Backend Playbook For Deployment on IIS Server
-  hosts: windowsmain
+  hosts: windows_server
   vars: 
     script_path: "C:\\Script\\script.py"
     site_name: "{{ site_name }}"
@@ -17,19 +17,19 @@
         Import-Module WebAdministration
         if (Test-Path "IIS:\\AppPools\\{{ site_name }}") { Write-Output "Exists" } else { Write-Output "NotExists" }
       register: app_pool_check
- 
+
     - name: Create Application Pool if it doesn't exist
       win_iis_webapppool:
         name: "{{ site_name }}"
         state: started
       when: app_pool_check.stdout.strip() == "NotExists"
- 
+
     # 2. Ensure IIS Site Directory Exists
     - name: Ensure IIS site directory exists
       win_file:
         path: "C:\\inetpub\\wwwroot\\{{ site_name }}"
         state: directory
- 
+
     # 3. Check if IIS Site Exists
     - name: Check if IIS Site exists
       win_shell: |
@@ -37,7 +37,7 @@
         $site = Get-Website -Name "{{ site_name }}" -ErrorAction SilentlyContinue
         if ($site) { Write-Output "Exists" } else { Write-Output "NotExists" }
       register: site_check
- 
+
     - name: Create IIS Site if it doesn't exist
       win_iis_website:
         name: "{{ site_name }}"
@@ -47,44 +47,44 @@
         ip: "*"
         application_pool: "{{ site_name }}"
       when: site_check.stdout.strip() == "NotExists"
- 
+
     # 4. Stop IIS Application Pool
     - name: Check App Pool State
       win_shell: |
         Import-Module WebAdministration
         (Get-WebAppPoolState -Name "{{ site_name }}").Value
       register: app_pool_state
- 
+
     - name: Stop App Pool if running
       win_shell: |
         Import-Module WebAdministration
         Stop-WebAppPool -Name "{{ site_name }}"
       when: app_pool_state.stdout.strip() == "Started"
- 
+
     # 5. Backup Preparation
     - name: Ensure Backup Directory Exists
       win_file:
         path: "{{ backup_path }}"
         state: directory
- 
+
     - name: Check Existing Site Files
       win_find:
         paths: "C:\\inetpub\\wwwroot\\{{ site_name }}"
       register: site_contents
- 
+
     # 6. Backup Configuration Files (only if they exist)
     - name: State config file
       win_stat:
         path: "C:\\inetpub\\wwwroot\\{{ site_name }}\\web.config"
       register: config_stats
- 
+
     - name: Backup Configuration File
       win_copy:
         src: "{{ config_stats.stat.path }}"
         dest: "{{ backup_path }}\\"
         remote_src: yes
       when: config_stats.stat.exists
- 
+
     - name: State folders
       win_stat:
         path: "{{ item }}"
@@ -92,7 +92,7 @@
         - "C:\\inetpub\\wwwroot\\{{ site_name }}\\logs"
         - "C:\\inetpub\\wwwroot\\{{ site_name }}\\runtimes"
       register: folder_stats
- 
+
     - name: Backup Logs and Runtimes
       win_copy:
         src: "{{ item.stat.path }}"
@@ -101,19 +101,18 @@
         recurse: yes
       loop: "{{ folder_stats.results }}"
       when: item.stat.exists
- 
+
     # 7. Clean Old Build
-    - name: Remove Existing Site Files
-      win_file:
-        path: "C:\\inetpub\\wwwroot\\{{ site_name }}"
-        state: absent
- 
+    - name: Remove Existing Site Files with PowerShell
+      win_shell: |
+        Remove-Item -Path "C:\inetpub\wwwroot\{{ site_name }}\*" -Recurse -Force
+
     # 8. Download & Deploy New Build
     - name: Ensure Latest Build Directory
       win_file:
         path: "{{ latest_build_path }}"
         state: directory
-        
+
     - name: Delete Old ZIP Files
       win_shell: |
         Get-ChildItem -Path "{{ latest_build_path }}" -Filter "*.zip" -Recurse | Remove-Item -Force
@@ -124,7 +123,7 @@
     - name: Debug Deleted ZIP Files
       debug:
         var: delete_old_zip_result.stdout
- 
+
     - name: Download Artifact Using Script
       win_shell: |
         python "{{ script_path }}" "{{ site_name }}"
@@ -135,13 +134,13 @@
     - name: Check if download was successful
       debug:
         var: download_result.stdout
-        
+
     - name: Unzip Artifact
       win_unzip:
         src: "{{ latest_build_path }}\\latest_build.zip"
         dest: "C:\\inetpub\\wwwroot\\{{ site_name }}\\"
         remote_src: yes
- 
+
     # 9. Restore Configurations from Backup
     - name: Restore Backup Files
       win_copy:
@@ -149,18 +148,18 @@
         dest: "C:\\inetpub\\wwwroot\\{{ site_name }}\\"
         remote_src: yes
       when: site_contents.matched > 0
- 
+
     # 10. Restart IIS (App Pool + Site)
     - name: Start Application Pool
       win_shell: |
         Import-Module WebAdministration
         Start-WebAppPool -Name "{{ site_name }}"
- 
+
     - name: Start IIS Website
       win_shell: |
         Import-Module WebAdministration
         Start-Website -Name "{{ site_name }}"
- 
+
     - name: Notify Success
       debug:
         msg: "Deployment completed successfully for {{ site_name }} on port {{ port_for_site }}"
